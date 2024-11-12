@@ -48,7 +48,36 @@ class CryptoAnalysisAgents:
             4. Liquidity metrics
             Provide numerical scores (1-10) for each metric."""
 
-    # Add other prompt methods similarly...
+    def _get_legal_prompt(self):
+        """Returns the prompt template for legal analysis."""
+        return """
+        Analyze the legal and regulatory aspects of the following cryptocurrency:
+        {coin_data}
+        
+        Please consider:
+        1. Current regulatory status
+        2. Compliance with major jurisdictions
+        3. Any pending regulatory issues
+        4. Legal risks and challenges
+        
+        Provide a detailed analysis in a clear, structured format.
+        """
+
+    def _get_market_prompt(self):
+        """Returns the prompt template for market analysis."""
+        return """
+        Provide a comprehensive market analysis for the following cryptocurrency:
+        {coin_data}
+        
+        Please analyze:
+        1. Current market position and price trends
+        2. Trading volume and liquidity
+        3. Market capitalization and dominance
+        4. Key market indicators and metrics
+        5. Recent market movements and potential catalysts
+        
+        Present the analysis in a clear, structured format with key insights highlighted.
+        """
 
     async def analyze_crypto(self, crypto: str, data: Dict) -> Dict:
         results = {}

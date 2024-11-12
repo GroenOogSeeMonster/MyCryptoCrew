@@ -11,6 +11,172 @@ This system employs five specialized AI agents:
 4. **Market Strategist**: Monitors market trends and sentiment analysis
 5. **Demo Trader**: Executes simulated trades on Bybit based on aggregated insights
 
+## Technical Overview
+
+### System Architecture
+
+```mermaid
+graph TD
+    A[Main Application] --> B[Orchestrator]
+    B --> C[Data Fetcher]
+    B --> D[AI Agents]
+    B --> E[Demo Trader]
+    C --> F[Bybit API]
+    C --> G[Market Data APIs]
+    D --> H[OpenAI API]
+    E --> F
+```
+
+### Core Components
+
+1. **Orchestrator (`orchestrator.py`)**
+   - Central coordination of all system components
+   - Manages data flow between agents
+   - Handles synchronization and error handling
+   - Aggregates and processes agent outputs
+
+2. **Data Fetcher (`data_fetcher.py`)**
+   - Implements rate-limited API calls
+   - Handles data normalization and validation
+   - Caches responses for efficiency
+   - Supports multiple data sources
+
+3. **AI Agents (`agents.py`)**
+   - Implements Agent Factory pattern
+   - Each agent specializes in specific analysis:
+     ```python
+     class BaseAgent:
+         def analyze(self, data): pass
+     
+     class TechnicalAgent(BaseAgent):
+         def analyze(self, data):
+             # Technical analysis implementation
+     ```
+
+4. **Demo Trader (`trader.py`)**
+   - Implements trading strategy pattern
+   - Handles position management
+   - Includes risk management rules
+   - Simulates trade execution
+
+### Data Flow
+
+1. **Input Processing**
+   ```
+   Raw Market Data → Normalization → Validation → Caching
+   ```
+
+2. **Analysis Pipeline**
+   ```
+   Normalized Data → Agent Analysis → Aggregation → Strategy Formation
+   ```
+
+3. **Trading Flow**
+   ```
+   Strategy → Risk Check → Position Sizing → Order Execution
+   ```
+
+## Developer Overview
+
+### Key Interfaces
+
+1. **Agent Interface**
+   ```python
+   class BaseAgent:
+       def analyze(self, data: Dict) -> AnalysisResult:
+           """
+           Base analysis method all agents must implement
+           """
+           pass
+   ```
+
+2. **Data Fetcher Interface**
+   ```python
+   class DataFetcher:
+       async def fetch_market_data(self, symbol: str) -> MarketData:
+           """
+           Fetches and normalizes market data
+           """
+           pass
+   ```
+
+### Error Handling
+
+1. **Hierarchical Error System**
+   ```
+   BaseError
+   ├── APIError
+   │   ├── RateLimitError
+   │   └── AuthenticationError
+   ├── ValidationError
+   └── TradeError
+   ```
+
+2. **Retry Mechanism**
+   - Exponential backoff for API calls
+   - Circuit breaker pattern for failing services
+   - Graceful degradation for non-critical components
+
+### Configuration Management
+
+1. **Environment Variables**
+   - API credentials
+   - System parameters
+   - Feature flags
+
+2. **Runtime Configuration**
+   - Trading parameters
+   - Risk management rules
+   - Agent behavior settings
+
+### Testing Strategy
+
+1. **Unit Tests**
+   - Agent logic
+   - Data validation
+   - Trading rules
+
+2. **Integration Tests**
+   - API interactions
+   - Multi-agent coordination
+   - End-to-end workflows
+
+3. **Mock Services**
+   - API responses
+   - Market data
+   - Trading execution
+
+### Development Workflow
+
+1. **Local Development**
+   ```bash
+   # Setup development environment
+   make setup-dev
+   
+   # Run tests
+   make test
+   
+   # Run linting
+   make lint
+   ```
+
+2. **CI/CD Pipeline**
+   - Automated testing
+   - Code quality checks
+   - Documentation generation
+
+### Performance Considerations
+
+1. **Optimization Techniques**
+   - Data caching
+   - Batch processing
+   - Asynchronous operations
+
+2. **Resource Management**
+   - Connection pooling
+   - Memory usage optimization
+   - CPU utilization control
+
 ## Prerequisites
 
 - Python 3.8 or higher
