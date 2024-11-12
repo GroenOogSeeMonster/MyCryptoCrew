@@ -22,8 +22,8 @@ This system employs five specialized AI agents:
 
 1. **Clone the Repository**
    ```bash
-   git clone https://github.com/yourusername/crypto-analysis-project.git
-   cd crypto-analysis-project
+   git clone https://github.com/GroenOogSeeMonster/MyCryptoCrew
+   cd MyCryptoCrew
    ```
 
 2. **Create and Activate Virtual Environment**
@@ -98,22 +98,23 @@ This system employs five specialized AI agents:
    - Each report is timestamped and includes insights from all agents
 
 ## Project Structure
+```
 crypto_analysis_project/
 ├── src/
-│ ├── init.py
-│ ├── config.py
-│ ├── data_fetcher.py
-│ ├── agents.py
-│ ├── trader.py
-│ ├── orchestrator.py
-│ └── main.py
+│   ├── __init__.py
+│   ├── config.py
+│   ├── data_fetcher.py
+│   ├── agents.py
+│   ├── trader.py
+│   ├── orchestrator.py
+│   └── main.py
 ├── tests/
 ├── data/
 ├── reports/
 ├── requirements.txt
 ├── .env
 └── README.md
-
+```
 
 ## Features
 
@@ -164,7 +165,7 @@ The system generates a detailed markdown report including:
 ## License
 
 This project is licensed under the Apache License 2.0 - see below for details:
-Copyright 2024 [Your Name]
+Copyright 2024 GroenOogSeeMonster
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
