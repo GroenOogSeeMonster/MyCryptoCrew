@@ -1,35 +1,43 @@
 import json
 import logging
 from typing import Dict
-from langchain import LLMChain
-from langchain.llms import OpenAI
+from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
 from .config import APIConfig
+from langchain_openai import ChatOpenAI
+from .data_fetcher import CryptoDataFetcher
+import asyncio
 
 logger = logging.getLogger(__name__)
 
 class CryptoAnalysisAgents:
     def __init__(self, config: APIConfig):
-        self.llm = OpenAI(api_key=config.openai_key)
+        self.config = config
+        self.llm = ChatOpenAI(
+            api_key=config.openai_key,
+            temperature=0.7,
+            model_name="gpt-3.5-turbo-16k"
+        )
+        self.data_fetcher = CryptoDataFetcher(config)  # Initialize data_fetcher first
         self.agents = self._create_agents()
 
     def _create_agents(self) -> Dict[str, LLMChain]:
         prompts = {
-            "technical": self._get_technical_prompt(),
-            "financial": self._get_financial_prompt(),
-            "legal": self._get_legal_prompt(),
-            "market": self._get_market_prompt(),
+            "technical": (self._get_technical_prompt(), ['crypto', 'market_data']),
+            "financial": (self._get_financial_prompt(), ['crypto', 'market_data']),
+            "legal": (self._get_legal_prompt(), ['coin_data']),
+            "market": (self._get_market_prompt(), ['coin_data']),
         }
 
         return {
             name: LLMChain(
                 llm=self.llm,
                 prompt=PromptTemplate(
-                    input_variables=['crypto', 'market_data'],
+                    input_variables=variables,
                     template=prompt
                 )
             )
-            for name, prompt in prompts.items()
+            for name, (prompt, variables) in prompts.items()
         }
 
     def _get_technical_prompt(self) -> str:
@@ -48,8 +56,7 @@ class CryptoAnalysisAgents:
             4. Liquidity metrics
             Provide numerical scores (1-10) for each metric."""
 
-    def _get_legal_prompt(self):
-        """Returns the prompt template for legal analysis."""
+    def _get_legal_prompt(self) -> str:
         return """
         Analyze the legal and regulatory aspects of the following cryptocurrency:
         {coin_data}
@@ -63,8 +70,7 @@ class CryptoAnalysisAgents:
         Provide a detailed analysis in a clear, structured format.
         """
 
-    def _get_market_prompt(self):
-        """Returns the prompt template for market analysis."""
+    def _get_market_prompt(self) -> str:
         return """
         Provide a comprehensive market analysis for the following cryptocurrency:
         {coin_data}
@@ -79,15 +85,37 @@ class CryptoAnalysisAgents:
         Present the analysis in a clear, structured format with key insights highlighted.
         """
 
-    async def analyze_crypto(self, crypto: str, data: Dict) -> Dict:
-        results = {}
-        for agent_name, agent in self.agents.items():
-            try:
-                results[agent_name] = await agent.arun(
-                    crypto=crypto,
-                    market_data=json.dumps(data)
-                )
-            except Exception as e:
-                logger.error(f"Error in {agent_name} analysis: {e}")
-                results[agent_name] = None
-        return results 
+    async def analyze_crypto(self, symbol: str) -> Dict:
+        """
+        Analyze cryptocurrency data for the given symbol
+        """
+        try:
+            # Fetch data concurrently
+            market_data, news_data = await asyncio.gather(
+                self.data_fetcher.fetch_market_data(symbol),
+                self.data_fetcher.fetch_news_data(symbol)
+            )
+            
+            # Run analysis with each agent
+            analyses = {}
+            for agent_name, agent in self.agents.items():
+                if agent_name in ["technical", "financial"]:
+                    analyses[agent_name] = await agent.arun(
+                        crypto=symbol,
+                        market_data=str(market_data)
+                    )
+                else:  # legal and market analyses
+                    analyses[agent_name] = await agent.arun(
+                        coin_data=str(market_data)
+                    )
+            
+            return {
+                "symbol": symbol,
+                "market_data": market_data,
+                "news_data": news_data,
+                "analyses": analyses
+            }
+            
+        except Exception as e:
+            logger.error(f"Error analyzing {symbol}: {str(e)}")
+            raise

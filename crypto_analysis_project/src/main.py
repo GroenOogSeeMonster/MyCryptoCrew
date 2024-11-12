@@ -1,25 +1,19 @@
 import asyncio
 import logging
-from .orchestrator import CryptoAnalysisOrchestrator
+from .config import APIConfig
+from .agents import CryptoAnalysisAgents
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 async def main():
-    cryptocurrencies = ['bitcoin', 'ethereum', 'cardano', 'polkadot']
-    orchestrator = CryptoAnalysisOrchestrator()
-    
-    try:
-        results = await orchestrator.analyze_cryptocurrencies(cryptocurrencies)
-        report = orchestrator.generate_report(results)
-        
-        with open("reports/crypto_analysis_report.md", "w") as f:
-            f.write(report)
-            
-        logger.info("Analysis complete. Report generated: reports/crypto_analysis_report.md")
-        
-    except Exception as e:
-        logger.error(f"Error in main execution: {e}")
+    config = APIConfig()
+    analyzer = CryptoAnalysisAgents(config)
+    result = await analyzer.analyze_crypto("bitcoin")
+    print(result)
 
 if __name__ == "__main__":
-    asyncio.run(main()) 
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        logger.error(f"Error in main execution: {str(e)}") 
