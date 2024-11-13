@@ -1,8 +1,8 @@
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from .config import APIConfig
-from .agents import CryptoAnalysisAgents
+from src.config import APIConfig
+from src.agents import CryptoAnalysisAgents
 from typing import Dict
 import signal
 
@@ -82,58 +82,68 @@ async def main():
     analyzer = CryptoAnalysisAgents(config)
     session = TradingSession(analyzer)
 
-    # Prompt user for trading parameters
     try:
-        trading_duration = int(input("Enter the trading duration in minutes: "))
-        risk_level = input("Enter the risk level (low, med, high): ").lower()
+        mode = input("Enter trading mode (normal/force): ").lower()
         leverage_amount = float(input("Enter the amount to leverage from the account wallet (in USD): "))
         
-        if risk_level not in ['low', 'med', 'high']:
-            raise ValueError("Risk level must be 'low', 'med', or 'high'")
-        if leverage_amount <= 0:
-            raise ValueError("Leverage amount must be greater than 0")
+        if mode == "force":
+            # Execute single forced trade
+            logger.info("Executing forced trade strategy...")
+            trade_result = await analyzer.force_best_trade(leverage_amount)
+            print("\n=== Forced Trade Result ===")
+            print(f"Symbol: {trade_result['symbol']}")
+            print(f"Entry Price: ${trade_result['entry_price']:.2f}")
+            print(f"Position Size: ${trade_result['position_size']:.2f}")
+            print(f"Stop Loss: ${trade_result['stop_loss']:.2f}")
+            print(f"Take Profit: ${trade_result['take_profit']:.2f}")
+            print(f"Comprehensive Score: {trade_result['comprehensive_score']:.2f}")
             
-    except ValueError as e:
-        logger.error(f"Invalid input: {str(e)}")
-        return
+        else:
+            # Original trading logic
+            trading_duration = int(input("Enter the trading duration in minutes: "))
+            risk_level = input("Enter the risk level (low, med, high): ").lower()
+            
+            # Set end time for trading
+            end_time = datetime.now() + timedelta(minutes=trading_duration)
+            
+            logger.info(f"Starting trading session for {trading_duration} minutes with risk level '{risk_level}' and leverage amount ${leverage_amount}")
 
-    # Set end time for trading
-    end_time = datetime.now() + timedelta(minutes=trading_duration)
-    
-    logger.info(f"Starting trading session for {trading_duration} minutes with risk level '{risk_level}' and leverage amount ${leverage_amount}")
-
-    try:
-        # Run continuous trading strategy until end time
-        while datetime.now() < end_time and session.is_running:
             try:
-                report = await analyzer.execute_trading_strategy(risk_level, leverage_amount)
-                logger.info(f"Strategy execution completed: {report}")
+                # Run continuous trading strategy until end time
+                while datetime.now() < end_time and session.is_running:
+                    try:
+                        report = await analyzer.execute_trading_strategy(risk_level, leverage_amount)
+                        logger.info(f"Strategy execution completed: {report}")
+                        
+                        # Wait for next iteration or until end time
+                        wait_time = min(300, (end_time - datetime.now()).total_seconds())
+                        if wait_time > 0:
+                            await asyncio.sleep(wait_time)
+                        
+                    except Exception as e:
+                        logger.error(f"Error in trading strategy: {str(e)}")
+                        if datetime.now() < end_time:
+                            await asyncio.sleep(60)  # Wait before retrying
+
+                # Trading session ended - cleanup and report
+                logger.info("Trading session completed. Generating final report...")
                 
-                # Wait for next iteration or until end time
-                wait_time = min(300, (end_time - datetime.now()).total_seconds())
-                if wait_time > 0:
-                    await asyncio.sleep(wait_time)
+                # Stop trading and cleanup
+                session.stop()
+                await session.cleanup()
+                
+                # Generate and display final report
+                final_report = analyzer.generate_final_report()
+                formatted_report = format_trading_report(final_report)
+                print(formatted_report)
+                
+                # Log report to file
+                logging.info("Final Trading Report:\n%s", formatted_report)
                 
             except Exception as e:
-                logger.error(f"Error in trading strategy: {str(e)}")
-                if datetime.now() < end_time:
-                    await asyncio.sleep(60)  # Wait before retrying
+                logger.error(f"Error in main execution: {str(e)}")
+                await session.cleanup()
 
-        # Trading session ended - cleanup and report
-        logger.info("Trading session completed. Generating final report...")
-        
-        # Stop trading and cleanup
-        session.stop()
-        await session.cleanup()
-        
-        # Generate and display final report
-        final_report = analyzer.generate_final_report()
-        formatted_report = format_trading_report(final_report)
-        print(formatted_report)
-        
-        # Log report to file
-        logging.info("Final Trading Report:\n%s", formatted_report)
-        
     except Exception as e:
         logger.error(f"Error in main execution: {str(e)}")
         await session.cleanup()

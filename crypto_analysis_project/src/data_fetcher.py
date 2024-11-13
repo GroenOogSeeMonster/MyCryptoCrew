@@ -4,6 +4,8 @@ from typing import List, Dict, Any
 import asyncio
 from aiohttp import TCPConnector
 from contextlib import asynccontextmanager
+from datetime import datetime
+from src.config import SelectionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -77,19 +79,86 @@ class CryptoDataFetcher:
 
         raise Exception(f"Failed after {self.max_retries} attempts")
 
-    async def fetch_market_rankings(self, limit: int = 10) -> List[Dict[str, str]]:
-        """Fetch top cryptocurrencies by market cap and cache their UUIDs"""
+    async def fetch_market_rankings(self, limit: int = 10, selection_config: SelectionConfig = None) -> List[Dict[str, str]]:
+        """Fetch and filter cryptocurrencies based on selection criteria"""
         try:
+            # Fetch more coins than needed to allow for filtering
             endpoint = "/coins"
             params = {
-                'limit': limit
+                'limit': limit * 3,  # Fetch 3x more to allow for filtering
+                'orderBy': 'marketCap',
+                'orderDirection': 'desc',
+                'timePeriod': '24h'
             }
             
             data = await self._make_request(endpoint, params)
-            return [{'symbol': coin['symbol'].upper(), 'uuid': coin['uuid']} for coin in data['data']['coins']]
+            coins = data['data']['coins']
+            
+            if selection_config:
+                filtered_coins = []
+                for coin in coins:
+                    if await self._meets_selection_criteria(coin, selection_config):
+                        filtered_coins.append({
+                            'symbol': coin['symbol'].upper(),
+                            'uuid': coin['uuid'],
+                            'market_cap': float(coin['marketCap']),
+                            'volume_24h': float(coin['24hVolume']),
+                            'price': float(coin['price']),
+                            'volatility': float(coin.get('change', '0').replace('%', '')) / 100
+                        })
+                
+                # Sort by market cap and limit to requested number
+                filtered_coins.sort(key=lambda x: x['market_cap'], reverse=True)
+                return filtered_coins[:limit]
+            
+            return [{'symbol': coin['symbol'].upper(), 'uuid': coin['uuid']} for coin in coins[:limit]]
+            
         except Exception as e:
             logger.error(f"Error in fetch_market_rankings: {str(e)}")
             raise
+
+    async def _meets_selection_criteria(self, coin: Dict, config: SelectionConfig) -> bool:
+        """Check if a coin meets the selection criteria"""
+        try:
+            symbol = coin['symbol'].upper()
+            
+            # Check blacklist/whitelist
+            if symbol in config.blacklist:
+                return False
+            if config.whitelist and symbol not in config.whitelist:
+                return False
+                
+            # Check market cap
+            market_cap = float(coin['marketCap'])
+            if market_cap < config.min_market_cap:
+                return False
+                
+            # Check volume
+            volume = float(coin['24hVolume'])
+            if volume < config.min_daily_volume:
+                return False
+                
+            # Check price
+            price = float(coin['price'])
+            if not (config.min_price <= price <= config.max_price):
+                return False
+                
+            # Check volatility
+            volatility = abs(float(coin.get('change', '0').replace('%', '')) / 100)
+            if volatility > config.max_volatility:
+                return False
+                
+            # Check market maturity if available
+            if 'listedAt' in coin:
+                days_listed = (datetime.now() - datetime.fromtimestamp(coin['listedAt'])).days
+                if days_listed < config.min_market_maturity:
+                    return False
+                    
+            return True
+                
+        except Exception as e:
+            logger.warning(f"Error checking selection criteria for {coin.get('symbol')}: {str(e)}")
+            return False
 
     async def fetch_market_data(self, uuid: str) -> Dict[str, Any]:
         """Fetch market data for a specific cryptocurrency"""

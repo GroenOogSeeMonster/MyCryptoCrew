@@ -3,17 +3,16 @@ import logging
 from typing import Dict, List
 from langchain.chains import LLMChain
 from langchain_core.prompts import PromptTemplate
-from .config import APIConfig
+from src.config import APIConfig, SelectionConfig
 from langchain_openai import ChatOpenAI
-from .data_fetcher import CryptoDataFetcher
+from src.data_fetcher import CryptoDataFetcher
 import asyncio
 import time
-from .trading_client import BybitDemoClient
-from .llm_manager import LLMManager
+from src.trading_client import BybitDemoClient
+from src.llm_manager import LLMManager
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
-
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -69,7 +68,8 @@ class CryptoAnalysisAgents:
         self.successful_trades = 0
         self.profit_trades = 0
         self.total_profit_loss = 0.0
-
+        self.selection_config = config.selection_config
+        
     def _create_prompts(self) -> Dict[str, str]:
         """Create analysis prompts"""
         return {
@@ -480,14 +480,37 @@ class CryptoAnalysisAgents:
                 raise
 
     async def get_top_cryptocurrencies(self, limit: int = 10) -> List[Dict[str, str]]:
-        """Fetch and cache top cryptocurrencies by market cap"""
-        # Updated return type annotation
+        """Fetch and cache top cryptocurrencies by market cap with filtering"""
         current_time = time.time()
         if not self.cache_timestamp or current_time - self.cache_timestamp > self.cache_duration:
-            market_data = await self.data_fetcher.fetch_market_rankings(limit=limit)
+            market_data = await self.data_fetcher.fetch_market_rankings(
+                limit=limit,
+                selection_config=self.selection_config
+            )
             self.top_cryptos_cache = market_data
             self.cache_timestamp = current_time
+            
+            # Log selection results
+            logger.info(f"Selected {len(market_data)} cryptocurrencies for analysis:")
+            for crypto in market_data:
+                logger.info(f"Selected {crypto['symbol']}: "
+                          f"Market Cap: ${crypto.get('market_cap', 0):,.2f}, "
+                          f"Volume: ${crypto.get('volume_24h', 0):,.2f}, "
+                          f"Volatility: {crypto.get('volatility', 0):.2%}")
+                
         return self.top_cryptos_cache
+
+    def update_selection_criteria(self, **kwargs):
+        """Update selection criteria dynamically"""
+        for key, value in kwargs.items():
+            if hasattr(self.selection_config, key):
+                setattr(self.selection_config, key, value)
+                logger.info(f"Updated selection criteria: {key} = {value}")
+            else:
+                logger.warning(f"Unknown selection criteria: {key}")
+        
+        # Clear cache to force refresh with new criteria
+        self.cache_timestamp = None
 
     def generate_final_report(self) -> Dict:
         """Generate a comprehensive final trading report"""
@@ -531,3 +554,84 @@ class CryptoAnalysisAgents:
                 'active_trades': 0,
                 'total_trades': len(self.trade_history)
             }
+
+    async def force_best_trade(self, leverage_amount: float) -> Dict:
+        """Force a trade on the most promising cryptocurrency with aggressive parameters"""
+        try:
+            logger.info("Analyzing market for forced trade opportunity...")
+            
+            # Get top cryptocurrencies with relaxed selection criteria
+            original_config = self.selection_config
+            relaxed_config = SelectionConfig()
+            relaxed_config.min_market_cap = original_config.min_market_cap / 2
+            relaxed_config.min_daily_volume = original_config.min_daily_volume / 2
+            relaxed_config.max_volatility = 0.5  # Allow higher volatility
+            
+            self.selection_config = relaxed_config
+            top_cryptos = await self.get_top_cryptocurrencies(limit=5)
+            self.selection_config = original_config
+            
+            # Analyze each cryptocurrency
+            opportunities = []
+            for crypto in top_cryptos:
+                analysis = await self.analyze_trading_opportunity(crypto, 'high')
+                
+                # Calculate comprehensive score
+                score = (
+                    analysis['technical_score'] * 0.4 +
+                    analysis['market_score'] * 0.4 +
+                    (1 - analysis['volatility']) * 0.2  # Lower volatility is better
+                )
+                
+                analysis['comprehensive_score'] = score
+                opportunities.append(analysis)
+                
+                logger.info(f"Analyzed {crypto['symbol']}: Score = {score:.2f}")
+                await asyncio.sleep(0.5)
+            
+            if not opportunities:
+                raise Exception("No viable trading opportunities found")
+            
+            # Select best opportunity
+            best_opportunity = max(opportunities, key=lambda x: x['comprehensive_score'])
+            
+            # Generate aggressive trade parameters
+            current_price = float(best_opportunity['market_data']['price'])
+            position_size = leverage_amount * 0.95  # Use 95% of available leverage
+            
+            # Place aggressive trade
+            logger.info(f"Executing forced trade on {best_opportunity['symbol']}")
+            order = await self.trading_client.create_order(
+                symbol=best_opportunity['symbol'],
+                side='Buy',
+                quantity=position_size / current_price,
+                price=current_price,
+                stop_loss=current_price * 0.90,  # 10% stop loss
+                take_profit=current_price * 1.20  # 20% take profit
+            )
+            
+            # Record trade
+            trade_result = {
+                'symbol': best_opportunity['symbol'],
+                'action': 'buy',
+                'entry_price': current_price,
+                'position_size': position_size,
+                'comprehensive_score': best_opportunity['comprehensive_score'],
+                'technical_score': best_opportunity['technical_score'],
+                'market_score': best_opportunity['market_score'],
+                'volatility': best_opportunity['volatility'],
+                'timestamp': datetime.now().isoformat(),
+                'order_id': order.get('orderId'),
+                'stop_loss': current_price * 0.90,
+                'take_profit': current_price * 1.20
+            }
+            
+            self.trade_history.append(trade_result)
+            logger.info(f"Forced trade executed: {trade_result}")
+            
+            return trade_result
+            
+        except Exception as e:
+            logger.error(f"Error executing forced trade: {str(e)}")
+            raise
+
