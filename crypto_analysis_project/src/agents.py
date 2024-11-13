@@ -2,7 +2,7 @@ import json
 import logging
 from typing import Dict, List
 from langchain.chains import LLMChain
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 from .config import APIConfig
 from langchain_openai import ChatOpenAI
 from .data_fetcher import CryptoDataFetcher
@@ -10,8 +10,14 @@ import asyncio
 import time
 from .trading_client import BybitDemoClient
 from .llm_manager import LLMManager
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 
 class CryptoAnalysisAgents:
     def __init__(self, config: APIConfig):
@@ -31,6 +37,38 @@ class CryptoAnalysisAgents:
             api_key=config.bybit_demo_key,
             api_secret=config.bybit_demo_secret
         )
+        self.trade_history = []
+        self.risk_parameters = {
+            'low': {
+                'min_score': 8.0,
+                'max_volatility': 0.3,
+                'position_size_multiplier': 0.5,
+                'stop_loss_percentage': 0.02,  # 2%
+                'take_profit_percentage': 0.04,  # 4%
+                'leverage_multiplier': 1
+            },
+            'med': {
+                'min_score': 7.0,
+                'max_volatility': 0.5,
+                'position_size_multiplier': 0.75,
+                'stop_loss_percentage': 0.05,  # 5%
+                'take_profit_percentage': 0.1,  # 10%
+                'leverage_multiplier': 2
+            },
+            'high': {
+                'min_score': 6.0,
+                'max_volatility': 0.7,
+                'position_size_multiplier': 1.0,
+                'stop_loss_percentage': 0.1,  # 10%
+                'take_profit_percentage': 0.2,  # 20%
+                'leverage_multiplier': 3
+            }
+        }
+        self.trading_history = []
+        self.total_trades_analyzed = 0
+        self.successful_trades = 0
+        self.profit_trades = 0
+        self.total_profit_loss = 0.0
 
     def _create_prompts(self) -> Dict[str, str]:
         """Create analysis prompts"""
@@ -86,263 +124,192 @@ class CryptoAnalysisAgents:
         Present the analysis in a clear, structured format with key insights highlighted.
         """
 
-    async def analyze_crypto(self, symbol: str) -> Dict:
-        """Analyze cryptocurrency data for the given symbol"""
+    async def analyze_crypto(self, uuid: str) -> Dict:
+        """Analyze cryptocurrency data for the given UUID"""
         try:
-            # Fetch market data first
-            market_data = await self.data_fetcher.fetch_market_data(symbol)
-            
-            # Fetch news data separately and handle potential failure
-            try:
-                news_data = await self.data_fetcher.fetch_news_data(symbol)
-            except Exception as e:
-                logger.warning(f"Failed to fetch news data for {symbol}: {str(e)}")
-                news_data = []
-            
-            # Run analyses with retry logic
-            analyses = {}
-            analysis_tasks = []
-            
-            # Create analysis tasks
-            for analysis_type, prompt in self.prompts.items():
-                variables = {
-                    'crypto': symbol,
-                    'market_data': str(market_data),
-                    'coin_data': str(market_data)  # Used for legal and market analyses
-                }
-                
-                task = self.llm_manager.run_analysis(prompt, variables)
-                analysis_tasks.append((analysis_type, task))
-            
-            # Run analyses concurrently with individual timeouts
-            for analysis_type, task in analysis_tasks:
+            # Fetch market data first using UUID
+            market_data = await self.data_fetcher.fetch_market_data(uuid)
+            if not market_data:
+                raise ValueError(f"No market data available for UUID {uuid}")
+
+            # Process market data for analysis
+            processed_market_data = {}
+            for key, value in market_data.items():
                 try:
-                    analysis_result = await asyncio.wait_for(task, timeout=30)
-                    analyses[analysis_type] = analysis_result
-                except asyncio.TimeoutError:
-                    logger.error(f"Timeout in {analysis_type} analysis for {symbol}")
-                    analyses[analysis_type] = "Analysis timeout"
-                except Exception as e:
-                    logger.error(f"Error in {analysis_type} analysis for {symbol}: {str(e)}")
-                    analyses[analysis_type] = "Analysis failed"
-            
-            return {
-                "symbol": symbol,
-                "market_data": market_data,
-                "news_data": news_data,
-                "analyses": analyses
+                    if isinstance(value, str):
+                        if '%' in value:
+                            value = float(value.replace('%', ''))
+                        elif any(symbol in value for symbol in ['$', '€', '£']):
+                            value = float(value.replace('$', '').replace('€', '').replace('£', '').replace(',', ''))
+                        elif value.replace('.', '', 1).replace('-', '', 1).isdigit():
+                            value = float(value)
+                    processed_market_data[key] = value
+                except (ValueError, TypeError):
+                    processed_market_data[key] = value
+
+            # Start news fetch task early
+            news_task = asyncio.create_task(self.data_fetcher.fetch_news_data(uuid))
+
+            # Prepare analysis variables
+            variables = {
+                'crypto': market_data.get('name', ''),
+                'market_data': json.dumps(processed_market_data, indent=2),
+                'coin_data': json.dumps(processed_market_data, indent=2)
             }
-                
+
+            # Create and execute all analysis tasks concurrently
+            analyses = {}
+            analysis_tasks = [
+                self.llm_manager.run_analysis(prompt, variables)
+                for analysis_type, prompt in self.prompts.items()
+            ]
+
+            # Wait for all analyses with timeout
+            try:
+                analysis_results = await asyncio.gather(*analysis_tasks, return_exceptions=True)
+                for analysis_type, result in zip(self.prompts.keys(), analysis_results):
+                    if isinstance(result, Exception):
+                        logger.warning(f"Failed to run {analysis_type} analysis: {str(result)}")
+                        analyses[analysis_type] = f"Analysis failed: {str(result)}"
+                    else:
+                        analyses[analysis_type] = result
+            except Exception as e:
+                logger.error(f"Error during analysis gathering: {str(e)}")
+                analyses = {"error": str(e)}
+
+            # Get news data from earlier task
+            try:
+                news_data = await news_task
+            except Exception as e:
+                logger.warning(f"Failed to fetch news data: {str(e)}")
+                news_data = []
+
+            return {
+                "market_data": processed_market_data,
+                "analyses": analyses,
+                "news_data": news_data,
+                "timestamp": time.time()
+            }
+
         except Exception as e:
-            logger.error(f"Error analyzing {symbol}: {str(e)}")
+            logger.error(f"Error in analyze_crypto: {str(e)}")
+            logger.exception("Full traceback:")
             raise
 
-    async def get_top_cryptocurrencies(self, limit: int = 10) -> List[str]:
-        """Fetch and cache top cryptocurrencies by market cap"""
-        current_time = time.time()
-        if (not self.cache_timestamp or 
-            current_time - self.cache_timestamp > self.cache_duration):
-            market_data = await self.data_fetcher.fetch_market_rankings()
-            self.top_cryptos_cache = market_data[:limit]
-            self.cache_timestamp = current_time
-        return self.top_cryptos_cache
-
-    async def analyze_trading_opportunity(self, symbol: str, max_retries: int = 3) -> Dict:
-        """Analyze trading opportunities for a specific cryptocurrency"""
-        for attempt in range(max_retries):
-            try:
-                analysis = await self.analyze_crypto(symbol)
-                
-                # Check if we have valid market data
-                if not analysis['market_data']:
-                    raise Exception("No market data available")
-                
-                # Calculate scores even if some analyses failed
-                technical_score = self._calculate_technical_score(
-                    analysis['analyses'].get('technical', "Score: 5.0")
-                )
-                market_score = self._calculate_market_score(
-                    analysis['analyses'].get('market', "Score: 5.0")
-                )
-                volatility = self._calculate_volatility(analysis['market_data'])
-                
-                return {
-                    'symbol': symbol,
-                    'technical_score': technical_score,
-                    'market_score': market_score,
-                    'volatility': volatility,
-                    'trade_recommendation': self._generate_trade_recommendation(
-                        technical_score, market_score, volatility
-                    )
-                }
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    logger.error(f"Error analyzing {symbol}: {str(e)}")
-                    raise
-                await asyncio.sleep(1 * (attempt + 1))
-                continue
-
-    async def execute_trading_strategy(self):
-        """Execute trading strategy on top cryptocurrencies"""
-        async with self.data_fetcher:  # Use data_fetcher as context manager
-            try:
-                # Get top cryptocurrencies
-                top_cryptos = await self.get_top_cryptocurrencies()
-                
-                # Analyze each cryptocurrency with delay between requests
-                opportunities = []
-                for crypto in top_cryptos:
-                    try:
-                        analysis = await self.analyze_trading_opportunity(crypto)
-                        opportunities.append(analysis)
-                        # Add small delay between analyses
-                        await asyncio.sleep(0.5)
-                    except Exception as e:
-                        logger.error(f"Error analyzing {crypto}: {str(e)}")
-                        continue
-                
-                if not opportunities:
-                    raise Exception("No valid opportunities found")
-                
-                # Filter and execute trades based on opportunities
-                for opportunity in opportunities:
-                    if self._should_execute_trade(opportunity):
-                        await self._place_trade(opportunity)
-                
-                # Generate trading report
-                report = self._generate_trading_report(opportunities)
-                logger.info(f"Trading strategy execution report: {report}")
-                
-                return report
-                
-            except Exception as e:
-                logger.error(f"Error executing trading strategy: {str(e)}")
-                raise
-
-    def _should_execute_trade(self, opportunity: Dict) -> bool:
-        """Determine if a trade should be executed based on analysis"""
-        return (opportunity['technical_score'] > 7.0 and
-                opportunity['market_score'] > 7.0 and
-                opportunity['volatility'] < 0.5)
-
-    async def _place_trade(self, opportunity: Dict):
-        """Place trade on Bybit demo account"""
-        recommendation = opportunity['trade_recommendation']
-        if recommendation['action'] == 'buy':
-            await self.trading_client.create_order(
-                symbol=opportunity['symbol'],
-                side='Buy',
-                quantity=recommendation['size'],
-                price=recommendation['entry_price'],
-                stop_loss=recommendation['stop_loss'],
-                take_profit=recommendation['take_profit']
-            )
-
-    def _calculate_technical_score(self, technical_analysis: str) -> float:
-        """
-        Calculate technical score from analysis text
-        Returns a score between 0 and 10
-        """
+    def _calculate_technical_score(self, analysis: str) -> float:
+        """Extract technical score from analysis text"""
         try:
-            # Extract numerical scores from the technical analysis text
+            import re
             scores = []
-            lines = technical_analysis.split('\n')
-            for line in lines:
-                # Look for numbers between 1-10 in the text
-                if '(' in line and ')' in line:
-                    try:
-                        score = float(line.split('(')[1].split(')')[0])
-                        if 1 <= score <= 10:
-                            scores.append(score)
-                    except ValueError:
-                        continue
-
-            # Return average score, default to 5 if no valid scores found
-            return sum(scores) / len(scores) if scores else 5.0
-
+            score_pattern = r'(?i)score:\s*(\d+(?:\.\d+)?)'
+            matches = re.finditer(score_pattern, analysis)
+            
+            for match in matches:
+                try:
+                    score = float(match.group(1))
+                    scores.append(score)
+                except ValueError as e:
+                    logger.warning(f"Failed to convert score to float: {match.group(1)}")
+                    continue
+            
+            if not scores:
+                logger.warning("No valid scores found in analysis, using default score")
+                return 5.0
+                
+            avg_score = sum(scores) / len(scores)
+            return min(max(avg_score, 0), 10)
+            
         except Exception as e:
             logger.error(f"Error calculating technical score: {str(e)}")
-            return 5.0  # Default to neutral score on error
+            return 5.0
 
-    def _calculate_market_score(self, market_analysis: str) -> float:
-        """
-        Calculate market score from analysis text
-        Returns a score between 0 and 10
-        """
+    def _calculate_market_score(self, analysis: str) -> float:
+        """Extract market score from analysis text"""
         try:
-            # Extract numerical scores from the market analysis text
+            import re
             scores = []
-            lines = market_analysis.split('\n')
-            for line in lines:
-                # Look for numbers between 1-10 in the text
-                if '(' in line and ')' in line:
-                    try:
-                        score = float(line.split('(')[1].split(')')[0])
-                        if 1 <= score <= 10:
-                            scores.append(score)
-                    except ValueError:
-                        continue
-
-            # Return average score, default to 5 if no valid scores found
-            return sum(scores) / len(scores) if scores else 5.0
-
+            score_pattern = r'(?i)score:\s*(\d+(?:\.\d+)?)'
+            matches = re.finditer(score_pattern, analysis)
+            
+            for match in matches:
+                try:
+                    score = float(match.group(1))
+                    scores.append(score)
+                except ValueError as e:
+                    logger.warning(f"Failed to convert score to float: {match.group(1)}")
+                    continue
+            
+            if not scores:
+                logger.warning("No valid scores found in analysis, using default score")
+                return 5.0
+                
+            avg_score = sum(scores) / len(scores)
+            return min(max(avg_score, 0), 10)
+            
         except Exception as e:
             logger.error(f"Error calculating market score: {str(e)}")
-            return 5.0  # Default to neutral score on error
+            return 5.0
 
     def _calculate_volatility(self, market_data: Dict) -> float:
-        """
-        Calculate volatility from market data
-        Returns a value between 0 and 1
-        """
+        """Calculate volatility from market data"""
         try:
-            if 'usd_24h_change' in market_data:
-                # Convert percentage to decimal and normalize
-                volatility = abs(market_data['usd_24h_change']) / 100
-                # Cap at 1.0 for extremely volatile assets
-                return min(volatility, 1.0)
-            return 0.5  # Default medium volatility if data not available
-
+            if not isinstance(market_data, dict):
+                logger.warning(f"Market data is not a dictionary: {type(market_data)}")
+                return 0.5
+            
+            if 'change' not in market_data:
+                logger.warning("'change' field not found in market data")
+                return 0.5
+            
+            change = market_data['change']
+            
+            if isinstance(change, str):
+                change = float(change.replace('%', '').replace(',', ''))
+            
+            volatility = abs(float(change)) / 100
+            return min(volatility, 1.0)
+            
         except Exception as e:
             logger.error(f"Error calculating volatility: {str(e)}")
-            return 0.5  # Default to medium volatility on error
+            logger.exception("Volatility calculation error:")
+            return 0.5
 
-    def _generate_trade_recommendation(
-        self, 
-        technical_score: float, 
-        market_score: float, 
-        volatility: float
-    ) -> Dict:
-        """
-        Generate trading recommendations based on analysis scores
-        """
+    def _generate_trade_recommendation(self, technical_score: float, market_score: float, volatility: float, risk_level: str = 'low') -> Dict:
+        """Generate trading recommendations based on analysis scores and risk level"""
         try:
+            risk_params = self.risk_parameters[risk_level]
+            
             # Calculate overall score (weighted average)
             overall_score = (technical_score * 0.4 + market_score * 0.6)
             
-            # Determine position size based on volatility
-            # Lower volatility allows for larger position sizes
+            # Calculate position size based on volatility and risk level
             base_position_size = 100  # Base position size in USD
-            position_size = base_position_size * (1 - volatility)
-            
-            # Generate recommendation
-            if overall_score >= 7.0:
+            adjusted_position_size = (
+                base_position_size * 
+                risk_params['position_size_multiplier'] * 
+                (1 - volatility)
+            )
+
+            # Generate recommendation based on risk parameters
+            if overall_score >= risk_params['min_score'] and volatility <= risk_params['max_volatility']:
                 return {
                     'action': 'buy',
                     'confidence': overall_score / 10,
-                    'size': position_size,
+                    'size': adjusted_position_size,
                     'entry_price': None,  # To be filled with current market price
-                    'stop_loss': None,    # To be calculated based on volatility
-                    'take_profit': None   # To be calculated based on volatility
+                    'stop_loss_percentage': risk_params['stop_loss_percentage'],
+                    'take_profit_percentage': risk_params['take_profit_percentage'],
+                    'leverage_multiplier': risk_params['leverage_multiplier']
                 }
-            elif overall_score <= 3.0:
+            elif overall_score <= (risk_params['min_score'] - 2.0):
                 return {
                     'action': 'sell',
                     'confidence': (10 - overall_score) / 10,
-                    'size': position_size,
+                    'size': adjusted_position_size,
                     'entry_price': None,
-                    'stop_loss': None,
-                    'take_profit': None
+                    'stop_loss_percentage': risk_params['stop_loss_percentage'],
+                    'take_profit_percentage': risk_params['take_profit_percentage'],
+                    'leverage_multiplier': risk_params['leverage_multiplier']
                 }
             else:
                 return {
@@ -350,10 +317,10 @@ class CryptoAnalysisAgents:
                     'confidence': 0.5,
                     'size': 0,
                     'entry_price': None,
-                    'stop_loss': None,
-                    'take_profit': None
+                    'stop_loss_percentage': 0,
+                    'take_profit_percentage': 0,
+                    'leverage_multiplier': 1
                 }
-
         except Exception as e:
             logger.error(f"Error generating trade recommendation: {str(e)}")
             return {
@@ -361,50 +328,206 @@ class CryptoAnalysisAgents:
                 'confidence': 0,
                 'size': 0,
                 'entry_price': None,
-                'stop_loss': None,
-                'take_profit': None
+                'stop_loss_percentage': 0,
+                'take_profit_percentage': 0,
+                'leverage_multiplier': 1
             }
 
-    def _generate_trading_report(self, opportunities: List[Dict]) -> Dict:
-        """
-        Generate a summary report of trading opportunities
-        """
+    async def execute_trading_strategy(self, risk_level: str, leverage_amount: float) -> Dict:
+        """Execute trading strategy on top cryptocurrencies with specified risk and leverage"""
         try:
-            total_opportunities = len(opportunities)
-            buy_signals = len([op for op in opportunities if op['trade_recommendation']['action'] == 'buy'])
-            sell_signals = len([op for op in opportunities if op['trade_recommendation']['action'] == 'sell'])
-            hold_signals = len([op for op in opportunities if op['trade_recommendation']['action'] == 'hold'])
+            # Removed context manager
+            top_cryptos = await self.get_top_cryptocurrencies()
             
-            avg_technical_score = sum(op['technical_score'] for op in opportunities) / total_opportunities
-            avg_market_score = sum(op['market_score'] for op in opportunities) / total_opportunities
-            avg_volatility = sum(op['volatility'] for op in opportunities) / total_opportunities
+            # Analyze each cryptocurrency with delay between requests
+            opportunities = []
+            for crypto in top_cryptos:
+                try:
+                    logger.info(f"Analyzing trading opportunity for {crypto}")
+                    analysis = await self.analyze_trading_opportunity(crypto, risk_level)
+                    opportunities.append(analysis)
+                    logger.info(f"Completed analysis for {crypto}: {analysis}")
+                    # Add small delay between analyses
+                    await asyncio.sleep(0.5)
+                except Exception as e:
+                    logger.error(f"Error analyzing {crypto}: {str(e)}")
+                    continue
+            
+            if not opportunities:
+                raise Exception("No valid opportunities found")
+            
+            # Filter and execute trades based on opportunities
+            for opportunity in opportunities:
+                if self._should_execute_trade(opportunity, risk_level):
+                    logger.info(f"Executing trade for {opportunity['symbol']}")
+                    await self._place_trade(opportunity, leverage_amount)
+            
+            # Generate trading report
+            report = self._generate_trading_report(opportunities)
+            logger.info(f"Trading strategy execution report: {report}")
+            
+            # Track the trading decision
+            trade_result = {
+                'symbol': opportunity['symbol'],
+                'action': opportunity['trade_recommendation']['action'],
+                'confidence': opportunity['trade_recommendation']['confidence'],
+                'timestamp': datetime.now().isoformat(),
+                'risk_level': risk_level,
+                'analysis_factors': opportunity['trade_recommendation'].get('analysis_factors', {}),
+                'profit': opportunity['trade_recommendation'].get('profit', 0.0)
+            }
+            
+            self.total_trades_analyzed += 1
+            
+            if opportunity['trade_recommendation']['action'] == 'buy':
+                self.successful_trades += 1
+                
+            if opportunity['trade_recommendation']['profit'] > 0:
+                self.profit_trades += 1
+                self.total_profit_loss += opportunity['trade_recommendation']['profit']
+            
+            self.trading_history.append(trade_result)
+            
+            return trade_result
+                
+        except Exception as e:
+            logger.error(f"Error executing trading strategy: {str(e)}")
+            raise
+
+    async def analyze_trading_opportunity(self, coin: Dict[str, str], risk_level: str) -> Dict:
+        """Analyze trading opportunities for a specific cryptocurrency"""
+        uuid = coin['uuid']
+        symbol = coin['symbol']
+        
+        try:
+            # Fetch market data
+            market_data = await self.data_fetcher.fetch_market_data(uuid)
+            logger.debug(f"Raw market data for {symbol}: {market_data}")
+            
+            # Run analysis
+            analysis = await self.analyze_crypto(uuid)
+            if not analysis or 'analyses' not in analysis:
+                raise ValueError(f"Invalid analysis data received for {symbol}")
+            
+            # Calculate scores
+            technical_score = self._calculate_technical_score(analysis['analyses'].get('technical', ''))
+            market_score = self._calculate_market_score(analysis['analyses'].get('market', ''))
+            
+            # Calculate volatility from market data
+            volatility = self._calculate_volatility(market_data)
+            
+            # Generate trade recommendation with risk level
+            current_price = float(market_data.get('price', 0))
+            recommendation = self._generate_trade_recommendation(
+                technical_score, 
+                market_score, 
+                volatility,
+                risk_level
+            )
+            
+            # Add price-based stop loss and take profit
+            if recommendation['action'] in ['buy', 'sell']:
+                recommendation['entry_price'] = current_price
+                recommendation['stop_loss'] = current_price * (1 - recommendation['stop_loss_percentage'])
+                recommendation['take_profit'] = current_price * (1 + recommendation['take_profit_percentage'])
             
             return {
-                'timestamp': time.time(),
-                'total_opportunities': total_opportunities,
-                'signals': {
-                    'buy': buy_signals,
-                    'sell': sell_signals,
-                    'hold': hold_signals
-                },
-                'averages': {
-                    'technical_score': avg_technical_score,
-                    'market_score': avg_market_score,
-                    'volatility': avg_volatility
-                },
-                'opportunities': [
-                    {
-                        'symbol': op['symbol'],
-                        'action': op['trade_recommendation']['action'],
-                        'confidence': op['trade_recommendation']['confidence']
-                    }
-                    for op in opportunities
-                ]
+                'symbol': symbol,
+                'uuid': uuid,
+                'technical_score': technical_score,
+                'market_score': market_score,
+                'volatility': volatility,
+                'market_data': market_data,
+                'trade_recommendation': recommendation,
+                'timestamp': time.time()
             }
             
         except Exception as e:
-            logger.error(f"Error generating trading report: {str(e)}")
+            logger.error(f"Error analyzing trading opportunity for {symbol}: {str(e)}")
+            raise
+
+    def _should_execute_trade(self, opportunity: Dict, risk_level: str) -> bool:
+        """Determine if a trade should be executed based on analysis and risk level"""
+        risk_params = self.risk_parameters[risk_level]
+        
+        should_trade = (
+            opportunity['technical_score'] > risk_params['min_score'] and
+            opportunity['market_score'] > risk_params['min_score'] and
+            opportunity['volatility'] < risk_params['max_volatility']
+        )
+        
+        logger.info(f"Should execute trade for {opportunity['symbol']}? {'Yes' if should_trade else 'No'}")
+        return should_trade
+
+    async def _place_trade(self, opportunity: Dict, leverage_amount: float):
+        """Place trade on Bybit demo account with specified leverage"""
+        recommendation = opportunity['trade_recommendation']
+        if recommendation['action'] == 'buy':
+            try:
+                logger.info(f"Placing trade for {opportunity['symbol']} with leverage amount: {leverage_amount}")
+                await self.trading_client.create_order(
+                    symbol=opportunity['symbol'],
+                    side='Buy',
+                    quantity=recommendation['size'] * leverage_amount,
+                    price=recommendation['entry_price'],
+                    stop_loss=recommendation['stop_loss'],
+                    take_profit=recommendation['take_profit']
+                )
+                self.trade_history.append(opportunity)
+                logger.info(f"Successfully placed trade for {opportunity['symbol']}")
+            except Exception as e:
+                logger.error(f"Error placing trade for {opportunity['symbol']}: {str(e)}")
+                raise
+
+    async def get_top_cryptocurrencies(self, limit: int = 10) -> List[Dict[str, str]]:
+        """Fetch and cache top cryptocurrencies by market cap"""
+        # Updated return type annotation
+        current_time = time.time()
+        if not self.cache_timestamp or current_time - self.cache_timestamp > self.cache_duration:
+            market_data = await self.data_fetcher.fetch_market_rankings(limit=limit)
+            self.top_cryptos_cache = market_data
+            self.cache_timestamp = current_time
+        return self.top_cryptos_cache
+
+    def generate_final_report(self) -> Dict:
+        """Generate a comprehensive final trading report"""
+        return {
+            'total_trades': self.total_trades_analyzed,
+            'successful_trades': self.successful_trades,
+            'profit_trades': self.profit_trades,
+            'total_profit_loss': self.total_profit_loss,
+            'trade_history': self.trading_history,
+            'performance_metrics': {
+                'success_rate': (self.successful_trades / self.total_trades_analyzed * 100) if self.total_trades_analyzed > 0 else 0,
+                'profit_rate': (self.profit_trades / self.total_trades_analyzed * 100) if self.total_trades_analyzed > 0 else 0,
+                'average_profit_per_trade': (self.total_profit_loss / self.total_trades_analyzed) if self.total_trades_analyzed > 0 else 0
+            }
+        }
+
+    def _generate_trading_report(self, opportunities: List[Dict]) -> Dict:
+        """Generate a report of trading opportunities and actions taken"""
+        try:
             return {
                 'timestamp': time.time(),
-                'error': str(e)
+                'opportunities_analyzed': len(opportunities),
+                'opportunities': [{
+                    'symbol': opp['symbol'],
+                    'technical_score': opp['technical_score'],
+                    'market_score': opp['market_score'],
+                    'volatility': opp['volatility'],
+                    'recommendation': opp['trade_recommendation']['action']
+                } for opp in opportunities],
+                'active_trades': len([opp for opp in opportunities 
+                                    if opp['trade_recommendation']['action'] in ['buy', 'sell']]),
+                'total_trades': len(self.trade_history)
+            }
+        except Exception as e:
+            logger.error(f"Error generating trading report: {str(e)}")
+            return {
+                'error': str(e),
+                'timestamp': time.time(),
+                'opportunities_analyzed': 0,
+                'opportunities': [],
+                'active_trades': 0,
+                'total_trades': len(self.trade_history)
             }

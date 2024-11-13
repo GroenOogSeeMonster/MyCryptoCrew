@@ -21,7 +21,7 @@ class BybitDemoClient:
         symbol: str,
         side: str,
         quantity: float,
-        price: float,
+        price: Optional[float] = None,
         stop_loss: Optional[float] = None,
         take_profit: Optional[float] = None
     ) -> Dict:
@@ -29,17 +29,19 @@ class BybitDemoClient:
         Place a new order on Bybit demo account
         """
         try:
-            # Create the main order
+            order_type = "Limit" if price else "Market"
             order_params = {
                 "category": "spot",
                 "symbol": symbol,
                 "side": side,
-                "orderType": "Limit",
+                "orderType": order_type,
                 "qty": str(quantity),
-                "price": str(price),
                 "timeInForce": "GTC",
             }
+            if price:
+                order_params["price"] = str(price)
 
+            logger.info(f"Placing order: {order_params}")
             response = self.client.place_order(**order_params)
             
             if response["retCode"] == 0:
@@ -52,26 +54,27 @@ class BybitDemoClient:
                     "status": "ACTIVE",
                     "timestamp": datetime.now().isoformat()
                 }
+                logger.info(f"Successfully placed order: {order_id}")
 
                 # Place stop loss if specified
                 if stop_loss:
-                    self._place_stop_loss(symbol, side, quantity, stop_loss, order_id)
+                    await self._place_stop_loss(symbol, side, quantity, stop_loss, order_id)
 
                 # Place take profit if specified
                 if take_profit:
-                    self._place_take_profit(symbol, side, quantity, take_profit, order_id)
+                    await self._place_take_profit(symbol, side, quantity, take_profit, order_id)
 
-                logger.info(f"Successfully placed order: {order_id}")
                 return self.active_orders[order_id]
             else:
-                logger.error(f"Failed to place order: {response}")
+                error_msg = f"Failed to place order: {response}"
+                logger.error(error_msg)
                 raise Exception(f"Order placement failed: {response['retMsg']}")
 
         except Exception as e:
             logger.error(f"Error creating order: {str(e)}")
             raise
 
-    def _place_stop_loss(
+    async def _place_stop_loss(
         self,
         symbol: str,
         side: str,
@@ -93,6 +96,7 @@ class BybitDemoClient:
                 "timeInForce": "GTC",
             }
             
+            logger.info(f"Placing stop loss order: {stop_params}")
             response = self.client.place_order(**stop_params)
             
             if response["retCode"] == 0:
@@ -100,14 +104,15 @@ class BybitDemoClient:
                 self.active_orders[parent_order_id]["stop_loss_id"] = stop_loss_id
                 logger.info(f"Successfully placed stop loss order: {stop_loss_id}")
             else:
-                logger.error(f"Failed to place stop loss order: {response}")
+                error_msg = f"Failed to place stop loss order: {response}"
+                logger.error(error_msg)
                 raise Exception(f"Stop loss placement failed: {response['retMsg']}")
 
         except Exception as e:
             logger.error(f"Error placing stop loss order: {str(e)}")
             raise
 
-    def _place_take_profit(
+    async def _place_take_profit(
         self,
         symbol: str,
         side: str,
@@ -128,6 +133,7 @@ class BybitDemoClient:
                 "timeInForce": "GTC",
             }
             
+            logger.info(f"Placing take profit order: {take_params}")
             response = self.client.place_order(**take_params)
             
             if response["retCode"] == 0:
@@ -135,9 +141,39 @@ class BybitDemoClient:
                 self.active_orders[parent_order_id]["take_profit_id"] = take_profit_id
                 logger.info(f"Successfully placed take profit order: {take_profit_id}")
             else:
-                logger.error(f"Failed to place take profit order: {response}")
+                error_msg = f"Failed to place take profit order: {response}"
+                logger.error(error_msg)
                 raise Exception(f"Take profit placement failed: {response['retMsg']}")
 
         except Exception as e:
             logger.error(f"Error placing take profit order: {str(e)}")
-            raise 
+            raise
+
+    async def cancel_order(self, order_id: str):
+        """Cancel an active order"""
+        try:
+            if order_id not in self.active_orders:
+                raise ValueError("Order ID not found in active orders.")
+            
+            logger.info(f"Cancelling order: {order_id}")
+            response = self.client.cancel_order(orderId=order_id)
+            
+            if response["retCode"] == 0:
+                self.active_orders[order_id]["status"] = "CANCELLED"
+                logger.info(f"Successfully cancelled order: {order_id}")
+            else:
+                error_msg = f"Failed to cancel order: {response}"
+                logger.error(error_msg)
+                raise Exception(f"Order cancellation failed: {response['retMsg']}")
+
+        except Exception as e:
+            logger.error(f"Error cancelling order {order_id}: {str(e)}")
+            raise
+
+    def get_active_orders(self) -> Dict[str, Dict]:
+        """Get all active orders"""
+        return self.active_orders
+
+    def get_order_status(self, order_id: str) -> Optional[Dict]:
+        """Get the status of a specific order"""
+        return self.active_orders.get(order_id)
