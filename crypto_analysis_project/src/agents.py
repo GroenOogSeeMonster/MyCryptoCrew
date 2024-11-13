@@ -14,7 +14,7 @@ from .llm_manager import LLMManager
 logger = logging.getLogger(__name__)
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
@@ -167,8 +167,6 @@ class CryptoAnalysisAgents:
     def _calculate_technical_score(self, analysis: str) -> float:
         """Extract technical score from analysis text"""
         try:
-            logger.debug(f"Calculating technical score from analysis: {analysis}")
-            # Look for score pattern in the text (e.g., "Score: 7.5" or "score: 8")
             import re
             scores = []
             score_pattern = r'(?i)score:\s*(\d+(?:\.\d+)?)'
@@ -186,20 +184,16 @@ class CryptoAnalysisAgents:
                 logger.warning("No valid scores found in analysis, using default score")
                 return 5.0
                 
-            # Average all found scores
             avg_score = sum(scores) / len(scores)
-            logger.debug(f"Calculated technical score: {avg_score}")
-            return min(max(avg_score, 0), 10)  # Ensure score is between 0 and 10
+            return min(max(avg_score, 0), 10)
             
         except Exception as e:
             logger.error(f"Error calculating technical score: {str(e)}")
-            return 5.0  # Default score on error
+            return 5.0
 
     def _calculate_market_score(self, analysis: str) -> float:
         """Extract market score from analysis text"""
         try:
-            logger.debug(f"Calculating market score from analysis: {analysis}")
-            # Look for score pattern in the text (e.g., "Score: 7.5" or "score: 8")
             import re
             scores = []
             score_pattern = r'(?i)score:\s*(\d+(?:\.\d+)?)'
@@ -217,48 +211,36 @@ class CryptoAnalysisAgents:
                 logger.warning("No valid scores found in analysis, using default score")
                 return 5.0
                 
-            # Average all found scores
             avg_score = sum(scores) / len(scores)
-            logger.debug(f"Calculated market score: {avg_score}")
-            return min(max(avg_score, 0), 10)  # Ensure score is between 0 and 10
+            return min(max(avg_score, 0), 10)
             
         except Exception as e:
             logger.error(f"Error calculating market score: {str(e)}")
-            return 5.0  # Default score on error
+            return 5.0
 
     def _calculate_volatility(self, market_data: Dict) -> float:
-        """
-        Calculate volatility from market data.
-        Returns a value between 0 and 1.
-        """
+        """Calculate volatility from market data"""
         try:
-            logger.debug(f"Calculating volatility with market_data: {market_data}")
-            
             if not isinstance(market_data, dict):
                 logger.warning(f"Market data is not a dictionary: {type(market_data)}")
                 return 0.5
             
-            # Coinranking API uses 'change' field for 24h price change
             if 'change' not in market_data:
                 logger.warning("'change' field not found in market data")
                 return 0.5
             
             change = market_data['change']
-            logger.debug(f"24h change value: {change} (type: {type(change)})")
             
-            # Convert to float if it's a string
             if isinstance(change, str):
                 change = float(change.replace('%', '').replace(',', ''))
             
-            # Convert percentage to decimal and normalize
             volatility = abs(float(change)) / 100
-            # Cap at 1.0 for extremely volatile assets
             return min(volatility, 1.0)
             
         except Exception as e:
             logger.error(f"Error calculating volatility: {str(e)}")
             logger.exception("Volatility calculation error:")
-            return 0.5  # Default to medium volatility on error
+            return 0.5
 
     def _generate_trade_recommendation(self, technical_score: float, market_score: float, volatility: float) -> Dict:
         """

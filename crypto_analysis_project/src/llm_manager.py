@@ -50,9 +50,8 @@ class LLMManager:
                 template=prompt_template
             )
             chain = prompt | self.llm
-            logger.info(f"Running analysis with variables: {variables}")
             response = await chain.ainvoke(variables)
-            logger.info(f"LLM analysis completed successfully: {response}")
+            logger.info(f"LLM analysis completed successfully")
             return response.content
         except openai.RateLimitError as e:
             logger.warning(f"Rate limit error: {str(e)}")
