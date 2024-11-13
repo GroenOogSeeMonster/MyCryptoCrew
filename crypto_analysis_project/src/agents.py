@@ -9,46 +9,36 @@ from .data_fetcher import CryptoDataFetcher
 import asyncio
 import time
 from .trading_client import BybitDemoClient
+from .llm_manager import LLMManager
 
 logger = logging.getLogger(__name__)
 
 class CryptoAnalysisAgents:
     def __init__(self, config: APIConfig):
         self.config = config
-        self.llm = ChatOpenAI(
+        self.llm_manager = LLMManager(
             api_key=config.openai_key,
-            temperature=0.7,
-            model_name="gpt-3.5-turbo-16k"
+            model_name="gpt-3.5-turbo-16k",
+            temperature=0.7
         )
-        self.data_fetcher = CryptoDataFetcher(config)  # Initialize data_fetcher first
-        self.agents = self._create_agents()
+        self.data_fetcher = CryptoDataFetcher(config)
+        self.prompts = self._create_prompts()
         self.top_cryptos_cache = {}
         self.cache_timestamp = None
-        self.cache_duration = 3600  # Update top cryptos every hour
+        self.cache_duration = 3600
         
-        # Add Bybit demo trading client
         self.trading_client = BybitDemoClient(
             api_key=config.bybit_demo_key,
             api_secret=config.bybit_demo_secret
         )
 
-    def _create_agents(self) -> Dict[str, LLMChain]:
-        prompts = {
-            "technical": (self._get_technical_prompt(), ['crypto', 'market_data']),
-            "financial": (self._get_financial_prompt(), ['crypto', 'market_data']),
-            "legal": (self._get_legal_prompt(), ['coin_data']),
-            "market": (self._get_market_prompt(), ['coin_data']),
-        }
-
+    def _create_prompts(self) -> Dict[str, str]:
+        """Create analysis prompts"""
         return {
-            name: LLMChain(
-                llm=self.llm,
-                prompt=PromptTemplate(
-                    input_variables=variables,
-                    template=prompt
-                )
-            )
-            for name, (prompt, variables) in prompts.items()
+            "technical": self._get_technical_prompt(),
+            "financial": self._get_financial_prompt(),
+            "legal": self._get_legal_prompt(),
+            "market": self._get_market_prompt()
         }
 
     def _get_technical_prompt(self) -> str:
@@ -97,28 +87,44 @@ class CryptoAnalysisAgents:
         """
 
     async def analyze_crypto(self, symbol: str) -> Dict:
-        """
-        Analyze cryptocurrency data for the given symbol
-        """
+        """Analyze cryptocurrency data for the given symbol"""
         try:
-            # Fetch data concurrently
-            market_data, news_data = await asyncio.gather(
-                self.data_fetcher.fetch_market_data(symbol),
-                self.data_fetcher.fetch_news_data(symbol)
-            )
+            # Fetch market data first
+            market_data = await self.data_fetcher.fetch_market_data(symbol)
             
-            # Run analysis with each agent
+            # Fetch news data separately and handle potential failure
+            try:
+                news_data = await self.data_fetcher.fetch_news_data(symbol)
+            except Exception as e:
+                logger.warning(f"Failed to fetch news data for {symbol}: {str(e)}")
+                news_data = []
+            
+            # Run analyses with retry logic
             analyses = {}
-            for agent_name, agent in self.agents.items():
-                if agent_name in ["technical", "financial"]:
-                    analyses[agent_name] = await agent.arun(
-                        crypto=symbol,
-                        market_data=str(market_data)
-                    )
-                else:  # legal and market analyses
-                    analyses[agent_name] = await agent.arun(
-                        coin_data=str(market_data)
-                    )
+            analysis_tasks = []
+            
+            # Create analysis tasks
+            for analysis_type, prompt in self.prompts.items():
+                variables = {
+                    'crypto': symbol,
+                    'market_data': str(market_data),
+                    'coin_data': str(market_data)  # Used for legal and market analyses
+                }
+                
+                task = self.llm_manager.run_analysis(prompt, variables)
+                analysis_tasks.append((analysis_type, task))
+            
+            # Run analyses concurrently with individual timeouts
+            for analysis_type, task in analysis_tasks:
+                try:
+                    analysis_result = await asyncio.wait_for(task, timeout=30)
+                    analyses[analysis_type] = analysis_result
+                except asyncio.TimeoutError:
+                    logger.error(f"Timeout in {analysis_type} analysis for {symbol}")
+                    analyses[analysis_type] = "Analysis timeout"
+                except Exception as e:
+                    logger.error(f"Error in {analysis_type} analysis for {symbol}: {str(e)}")
+                    analyses[analysis_type] = "Analysis failed"
             
             return {
                 "symbol": symbol,
@@ -126,7 +132,7 @@ class CryptoAnalysisAgents:
                 "news_data": news_data,
                 "analyses": analyses
             }
-            
+                
         except Exception as e:
             logger.error(f"Error analyzing {symbol}: {str(e)}")
             raise
@@ -141,51 +147,77 @@ class CryptoAnalysisAgents:
             self.cache_timestamp = current_time
         return self.top_cryptos_cache
 
-    async def analyze_trading_opportunity(self, symbol: str) -> Dict:
+    async def analyze_trading_opportunity(self, symbol: str, max_retries: int = 3) -> Dict:
         """Analyze trading opportunities for a specific cryptocurrency"""
-        analysis = await self.analyze_crypto(symbol)
-        
-        # Add trading-specific analysis
-        technical_score = self._calculate_technical_score(analysis['analyses']['technical'])
-        market_score = self._calculate_market_score(analysis['analyses']['market'])
-        volatility = self._calculate_volatility(analysis['market_data'])
-        
-        return {
-            'symbol': symbol,
-            'technical_score': technical_score,
-            'market_score': market_score,
-            'volatility': volatility,
-            'trade_recommendation': self._generate_trade_recommendation(
-                technical_score, market_score, volatility
-            )
-        }
+        for attempt in range(max_retries):
+            try:
+                analysis = await self.analyze_crypto(symbol)
+                
+                # Check if we have valid market data
+                if not analysis['market_data']:
+                    raise Exception("No market data available")
+                
+                # Calculate scores even if some analyses failed
+                technical_score = self._calculate_technical_score(
+                    analysis['analyses'].get('technical', "Score: 5.0")
+                )
+                market_score = self._calculate_market_score(
+                    analysis['analyses'].get('market', "Score: 5.0")
+                )
+                volatility = self._calculate_volatility(analysis['market_data'])
+                
+                return {
+                    'symbol': symbol,
+                    'technical_score': technical_score,
+                    'market_score': market_score,
+                    'volatility': volatility,
+                    'trade_recommendation': self._generate_trade_recommendation(
+                        technical_score, market_score, volatility
+                    )
+                }
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    logger.error(f"Error analyzing {symbol}: {str(e)}")
+                    raise
+                await asyncio.sleep(1 * (attempt + 1))
+                continue
 
     async def execute_trading_strategy(self):
         """Execute trading strategy on top cryptocurrencies"""
-        try:
-            # Get top cryptocurrencies
-            top_cryptos = await self.get_top_cryptocurrencies()
-            
-            # Analyze each cryptocurrency
-            opportunities = []
-            for crypto in top_cryptos:
-                analysis = await self.analyze_trading_opportunity(crypto)
-                opportunities.append(analysis)
-            
-            # Filter and execute trades based on opportunities
-            for opportunity in opportunities:
-                if self._should_execute_trade(opportunity):
-                    await self._place_trade(opportunity)
-            
-            # Generate trading report
-            report = self._generate_trading_report(opportunities)
-            logger.info(f"Trading strategy execution report: {report}")
-            
-            return report
-            
-        except Exception as e:
-            logger.error(f"Error executing trading strategy: {str(e)}")
-            raise
+        async with self.data_fetcher:  # Use data_fetcher as context manager
+            try:
+                # Get top cryptocurrencies
+                top_cryptos = await self.get_top_cryptocurrencies()
+                
+                # Analyze each cryptocurrency with delay between requests
+                opportunities = []
+                for crypto in top_cryptos:
+                    try:
+                        analysis = await self.analyze_trading_opportunity(crypto)
+                        opportunities.append(analysis)
+                        # Add small delay between analyses
+                        await asyncio.sleep(0.5)
+                    except Exception as e:
+                        logger.error(f"Error analyzing {crypto}: {str(e)}")
+                        continue
+                
+                if not opportunities:
+                    raise Exception("No valid opportunities found")
+                
+                # Filter and execute trades based on opportunities
+                for opportunity in opportunities:
+                    if self._should_execute_trade(opportunity):
+                        await self._place_trade(opportunity)
+                
+                # Generate trading report
+                report = self._generate_trading_report(opportunities)
+                logger.info(f"Trading strategy execution report: {report}")
+                
+                return report
+                
+            except Exception as e:
+                logger.error(f"Error executing trading strategy: {str(e)}")
+                raise
 
     def _should_execute_trade(self, opportunity: Dict) -> bool:
         """Determine if a trade should be executed based on analysis"""
