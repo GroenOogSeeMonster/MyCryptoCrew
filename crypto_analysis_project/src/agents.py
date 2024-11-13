@@ -10,6 +10,7 @@ import asyncio
 import time
 from .trading_client import BybitDemoClient
 from .llm_manager import LLMManager
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,37 @@ class CryptoAnalysisAgents:
             api_secret=config.bybit_demo_secret
         )
         self.trade_history = []
+        self.risk_parameters = {
+            'low': {
+                'min_score': 8.0,
+                'max_volatility': 0.3,
+                'position_size_multiplier': 0.5,
+                'stop_loss_percentage': 0.02,  # 2%
+                'take_profit_percentage': 0.04,  # 4%
+                'leverage_multiplier': 1
+            },
+            'med': {
+                'min_score': 7.0,
+                'max_volatility': 0.5,
+                'position_size_multiplier': 0.75,
+                'stop_loss_percentage': 0.05,  # 5%
+                'take_profit_percentage': 0.1,  # 10%
+                'leverage_multiplier': 2
+            },
+            'high': {
+                'min_score': 6.0,
+                'max_volatility': 0.7,
+                'position_size_multiplier': 1.0,
+                'stop_loss_percentage': 0.1,  # 10%
+                'take_profit_percentage': 0.2,  # 20%
+                'leverage_multiplier': 3
+            }
+        }
+        self.trading_history = []
+        self.total_trades_analyzed = 0
+        self.successful_trades = 0
+        self.profit_trades = 0
+        self.total_profit_loss = 0.0
 
     def _create_prompts(self) -> Dict[str, str]:
         """Create analysis prompts"""
@@ -242,37 +274,42 @@ class CryptoAnalysisAgents:
             logger.exception("Volatility calculation error:")
             return 0.5
 
-    def _generate_trade_recommendation(self, technical_score: float, market_score: float, volatility: float) -> Dict:
-        """
-        Generate trading recommendations based on analysis scores.
-        """
+    def _generate_trade_recommendation(self, technical_score: float, market_score: float, volatility: float, risk_level: str = 'low') -> Dict:
+        """Generate trading recommendations based on analysis scores and risk level"""
         try:
+            risk_params = self.risk_parameters[risk_level]
+            
             # Calculate overall score (weighted average)
             overall_score = (technical_score * 0.4 + market_score * 0.6)
-
-            # Determine position size based on volatility
-            # Lower volatility allows for larger position sizes
+            
+            # Calculate position size based on volatility and risk level
             base_position_size = 100  # Base position size in USD
-            position_size = base_position_size * (1 - volatility)
+            adjusted_position_size = (
+                base_position_size * 
+                risk_params['position_size_multiplier'] * 
+                (1 - volatility)
+            )
 
-            # Generate recommendation
-            if overall_score >= 7.0:
+            # Generate recommendation based on risk parameters
+            if overall_score >= risk_params['min_score'] and volatility <= risk_params['max_volatility']:
                 return {
                     'action': 'buy',
                     'confidence': overall_score / 10,
-                    'size': position_size,
+                    'size': adjusted_position_size,
                     'entry_price': None,  # To be filled with current market price
-                    'stop_loss': None,    # To be calculated based on volatility
-                    'take_profit': None   # To be calculated based on volatility
+                    'stop_loss_percentage': risk_params['stop_loss_percentage'],
+                    'take_profit_percentage': risk_params['take_profit_percentage'],
+                    'leverage_multiplier': risk_params['leverage_multiplier']
                 }
-            elif overall_score <= 3.0:
+            elif overall_score <= (risk_params['min_score'] - 2.0):
                 return {
                     'action': 'sell',
                     'confidence': (10 - overall_score) / 10,
-                    'size': position_size,
+                    'size': adjusted_position_size,
                     'entry_price': None,
-                    'stop_loss': None,
-                    'take_profit': None
+                    'stop_loss_percentage': risk_params['stop_loss_percentage'],
+                    'take_profit_percentage': risk_params['take_profit_percentage'],
+                    'leverage_multiplier': risk_params['leverage_multiplier']
                 }
             else:
                 return {
@@ -280,8 +317,9 @@ class CryptoAnalysisAgents:
                     'confidence': 0.5,
                     'size': 0,
                     'entry_price': None,
-                    'stop_loss': None,
-                    'take_profit': None
+                    'stop_loss_percentage': 0,
+                    'take_profit_percentage': 0,
+                    'leverage_multiplier': 1
                 }
         except Exception as e:
             logger.error(f"Error generating trade recommendation: {str(e)}")
@@ -290,8 +328,9 @@ class CryptoAnalysisAgents:
                 'confidence': 0,
                 'size': 0,
                 'entry_price': None,
-                'stop_loss': None,
-                'take_profit': None
+                'stop_loss_percentage': 0,
+                'take_profit_percentage': 0,
+                'leverage_multiplier': 1
             }
 
     async def execute_trading_strategy(self, risk_level: str, leverage_amount: float) -> Dict:
@@ -327,7 +366,29 @@ class CryptoAnalysisAgents:
             report = self._generate_trading_report(opportunities)
             logger.info(f"Trading strategy execution report: {report}")
             
-            return report
+            # Track the trading decision
+            trade_result = {
+                'symbol': opportunity['symbol'],
+                'action': opportunity['trade_recommendation']['action'],
+                'confidence': opportunity['trade_recommendation']['confidence'],
+                'timestamp': datetime.now().isoformat(),
+                'risk_level': risk_level,
+                'analysis_factors': opportunity['trade_recommendation'].get('analysis_factors', {}),
+                'profit': opportunity['trade_recommendation'].get('profit', 0.0)
+            }
+            
+            self.total_trades_analyzed += 1
+            
+            if opportunity['trade_recommendation']['action'] == 'buy':
+                self.successful_trades += 1
+                
+            if opportunity['trade_recommendation']['profit'] > 0:
+                self.profit_trades += 1
+                self.total_profit_loss += opportunity['trade_recommendation']['profit']
+            
+            self.trading_history.append(trade_result)
+            
+            return trade_result
                 
         except Exception as e:
             logger.error(f"Error executing trading strategy: {str(e)}")
@@ -355,15 +416,20 @@ class CryptoAnalysisAgents:
             # Calculate volatility from market data
             volatility = self._calculate_volatility(market_data)
             
-            # Generate trade recommendation
-            trade_recommendation = {
-                'action': 'buy' if technical_score > 7 and market_score > 7 else 'hold',
-                'confidence': min((technical_score + market_score) / 2, 10),
-                'size': 0.1,  # Default position size
-                'entry_price': float(market_data.get('price', 0)),
-                'stop_loss': float(market_data.get('price', 0)) * 0.95,  # 5% stop loss
-                'take_profit': float(market_data.get('price', 0)) * 1.1  # 10% take profit
-            }
+            # Generate trade recommendation with risk level
+            current_price = float(market_data.get('price', 0))
+            recommendation = self._generate_trade_recommendation(
+                technical_score, 
+                market_score, 
+                volatility,
+                risk_level
+            )
+            
+            # Add price-based stop loss and take profit
+            if recommendation['action'] in ['buy', 'sell']:
+                recommendation['entry_price'] = current_price
+                recommendation['stop_loss'] = current_price * (1 - recommendation['stop_loss_percentage'])
+                recommendation['take_profit'] = current_price * (1 + recommendation['take_profit_percentage'])
             
             return {
                 'symbol': symbol,
@@ -372,7 +438,7 @@ class CryptoAnalysisAgents:
                 'market_score': market_score,
                 'volatility': volatility,
                 'market_data': market_data,
-                'trade_recommendation': trade_recommendation,
+                'trade_recommendation': recommendation,
                 'timestamp': time.time()
             }
             
@@ -382,10 +448,14 @@ class CryptoAnalysisAgents:
 
     def _should_execute_trade(self, opportunity: Dict, risk_level: str) -> bool:
         """Determine if a trade should be executed based on analysis and risk level"""
-        min_score = 7.0 if risk_level == 'high' else 6.0 if risk_level == 'med' else 5.0
-        should_trade = (opportunity['technical_score'] > min_score and
-                        opportunity['market_score'] > min_score and
-                        opportunity['volatility'] < 0.5)
+        risk_params = self.risk_parameters[risk_level]
+        
+        should_trade = (
+            opportunity['technical_score'] > risk_params['min_score'] and
+            opportunity['market_score'] > risk_params['min_score'] and
+            opportunity['volatility'] < risk_params['max_volatility']
+        )
+        
         logger.info(f"Should execute trade for {opportunity['symbol']}? {'Yes' if should_trade else 'No'}")
         return should_trade
 
@@ -420,31 +490,19 @@ class CryptoAnalysisAgents:
         return self.top_cryptos_cache
 
     def generate_final_report(self) -> Dict:
-        """Generate a final report of all trades made during the session"""
-        try:
-            total_trades = len(self.trade_history)
-            successful_trades = len([trade for trade in self.trade_history if trade['trade_recommendation']['action'] == 'buy'])
-            profit_trades = len([trade for trade in self.trade_history if trade.get('profit', 0) > 0])
-            
-            report = {
-                'total_trades': total_trades,
-                'successful_trades': successful_trades,
-                'profit_trades': profit_trades,
-                'trade_history': [
-                    {
-                        'symbol': trade['symbol'],
-                        'action': trade['trade_recommendation']['action'],
-                        'confidence': trade['trade_recommendation']['confidence'],
-                        'profit': trade.get('profit', 0)
-                    }
-                    for trade in self.trade_history
-                ]
+        """Generate a comprehensive final trading report"""
+        return {
+            'total_trades': self.total_trades_analyzed,
+            'successful_trades': self.successful_trades,
+            'profit_trades': self.profit_trades,
+            'total_profit_loss': self.total_profit_loss,
+            'trade_history': self.trading_history,
+            'performance_metrics': {
+                'success_rate': (self.successful_trades / self.total_trades_analyzed * 100) if self.total_trades_analyzed > 0 else 0,
+                'profit_rate': (self.profit_trades / self.total_trades_analyzed * 100) if self.total_trades_analyzed > 0 else 0,
+                'average_profit_per_trade': (self.total_profit_loss / self.total_trades_analyzed) if self.total_trades_analyzed > 0 else 0
             }
-            logger.info(f"Final Trading Report: {report}")
-            return report
-        except Exception as e:
-            logger.error(f"Error generating final report: {str(e)}")
-            return {'error': str(e)}
+        }
 
     def _generate_trading_report(self, opportunities: List[Dict]) -> Dict:
         """Generate a report of trading opportunities and actions taken"""
