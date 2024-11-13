@@ -8,6 +8,7 @@ class APIConfig:
     def __init__(self):
         # Existing API keys
         self.openai_key = os.getenv('OPENAI_API_KEY')
+        self.coinranking_api_key = os.getenv('COINRANKING_API_KEY')
         
         # Bybit demo credentials
         self.bybit_demo_key = os.getenv('BYBIT_DEMO_API_KEY')
@@ -20,6 +21,7 @@ class APIConfig:
         """Validate that all required API credentials are present"""
         required_credentials = {
             'OPENAI_API_KEY': self.openai_key,
+            'COINRANKING_API_KEY': self.coinranking_api_key,
             'BYBIT_DEMO_API_KEY': self.bybit_demo_key,
             'BYBIT_DEMO_API_SECRET': self.bybit_demo_secret
         }
